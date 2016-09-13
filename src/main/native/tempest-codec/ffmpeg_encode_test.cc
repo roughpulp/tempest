@@ -163,19 +163,16 @@ public:
 
     static std::unique_ptr<Decoder> create(
         std::istream& in,
-        AVCodecID codec_id,
-        std::ostream& out);
+        AVCodecID codec_id);
 
     Decoder(
         std::istream& in,
         AVCodecContext* ctx,
-        AVFrame* frame,
-        std::ostream& out
+        AVFrame* frame
     ):
         in_(in),
         ctx_(ctx),
-        frame_(frame),
-        out_(out)
+        frame_(frame)
     {
         // set end of buffer to 0 (this ensures that no over-reading happens for damaged MPEG streams)
         memset(buffer_ + BUFFER_SIZE, 0, AV_INPUT_BUFFER_PADDING_SIZE);
@@ -198,7 +195,6 @@ private:
     bool read_input();
     
     std::istream& in_;
-    std::ostream& out_;
     AVCodecContext* ctx_;
     AVFrame* frame_;
     AVPacket packet_;
@@ -214,8 +210,7 @@ Decoder::~Decoder() {
 
 std::unique_ptr<Decoder> Decoder::create(
         std::istream& in,
-        AVCodecID codec_id,
-        std::ostream& out) {
+        AVCodecID codec_id) {
     avcodec_register_all();
     
     /* find the video encoder */
@@ -228,7 +223,24 @@ std::unique_ptr<Decoder> Decoder::create(
     if (ctx == nullptr) {
         throw std::runtime_error("avcodec_alloc_context3 failed");
     }
-
+    
+    if (codec->capabilities & AV_CODEC_CAP_TRUNCATED) {
+        ctx->flags |= AV_CODEC_FLAG_TRUNCATED; // we do not send complete frames
+    }
+    
+    /*
+    When AVCodecContext.refcounted_frames is set to 1, the frame is
+    reference counted and the returned reference belongs to the
+    caller. The caller must release the frame using av_frame_unref()
+    when the frame is no longer needed. The caller may safely write
+    to the frame if av_frame_is_writable() returns 1.
+    When AVCodecContext.refcounted_frames is set to 0, the returned
+    reference belongs to the decoder and is valid only until the
+    next call to this function or until closing or flushing the
+    decoder. The caller may not write to it.
+    */    
+    ctx->refcounted_frames = 0;
+    
     if (avcodec_open2(ctx, codec, nullptr) < 0) {
         throw std::runtime_error("avcodec_open2 failed");
     }
@@ -238,9 +250,11 @@ std::unique_ptr<Decoder> Decoder::create(
         throw std::runtime_error("av_frame_alloc failed");
     }
     
-    auto decoder = std::make_unique<Decoder>(in, ctx, frame, out);
+    auto decoder = std::make_unique<Decoder>(in, ctx, frame);
     
     av_init_packet(&decoder->packet_);
+    decoder->packet_.data = nullptr;
+    decoder->packet_.size = 0;
     
     return decoder;
 }
@@ -308,7 +322,7 @@ void video_encode_example2(AVCodecID codec_id) {
     
     auto encoder = Encoder::create(fout, codec_id, 352, 288, 25);
     {
-        for (int tt = 0; tt < 25; ++tt) {
+        for (int tt = 0; tt < 10 * 25; ++tt) {
             make_image2(tt, encoder->frame());
             encoder->next();
         }
@@ -318,9 +332,8 @@ void video_encode_example2(AVCodecID codec_id) {
 }
 
 void video_decode(AVCodecID codec_id) {
-    std::ofstream fout("test.mpg1.bis", std::ios::out | std::ios::binary);
     std::ifstream fin("test.mpg1", std::ios::in | std::ios::binary);
-    auto decoder = Decoder::create(fin, codec_id, fout);
+    auto decoder = Decoder::create(fin, codec_id);
     {
         while(decoder->next()) {
             cout << "next frame" << endl << flush;
