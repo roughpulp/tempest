@@ -51,7 +51,8 @@ private:
     Encoder(const Encoder&) = delete;
     Encoder& operator=(const Encoder&) = delete;
     
-    int send_frame(AVFrame* frame);
+    void send_frame(AVFrame* frame);
+    bool receive_packets();
     
     std::ostream& out_;
     AVCodecContext* ctx_;
@@ -137,21 +138,64 @@ void Encoder::next() {
 
 void Encoder::close()
 {
-    while (send_frame(nullptr)) {
-    }
+    send_frame(nullptr);
 }
 
-int Encoder::send_frame(AVFrame* frame) {
-    int got_output;
-    const int res = avcodec_encode_video2(this->ctx_, &this->packet_, frame, &got_output);
-    if (res != 0) {
-        throw std::runtime_error("avcodec_encode_video2 failed: " + std::to_string(res));
+void Encoder::send_frame(AVFrame* frame) {
+    for(int ii = 0; ii < 1000; ++ii) {
+        const int res = avcodec_send_frame(this->ctx_, frame);
+        switch (res) {
+        case 0:
+            return;
+        case AVERROR(EAGAIN):
+            // input is not accepted right now - the frame must be
+            // resent after trying to read output packets
+            if (receive_packets()) {
+                break;
+            } else {
+                //EOS
+                return;
+            }
+        case AVERROR_EOF:
+            throw std::runtime_error("avcodec_send_frame failed: AVERROR_EOF, the encoder has been flushed, and no new frames can be sent to it");
+            
+        case AVERROR(EINVAL):
+            throw std::runtime_error("avcodec_send_frame failed: AVERROR(EINVAL), codec not opened, refcounted_frames not set, it is a decoder, or requires flush");
+            
+        case AVERROR(ENOMEM):
+            throw std::runtime_error("avcodec_send_frame failed: AVERROR(ENOMEM), failed to add packet to internal queue, or similar other errors: legitimate decoding errors");
+            
+        default:
+            throw std::runtime_error("avcodec_send_frame failed: " + std::to_string(res));
+        }
     }
-    if (got_output) {
-        this->out_.write(reinterpret_cast<char*>(this->packet_.data), this->packet_.size);
-        av_packet_unref(&this->packet_);
+    throw std::runtime_error("video_encode_send_frame too many loops");
+}
+
+bool Encoder::receive_packets()
+{
+    for (int ii = 0; ii < 1000 * 1000; ++ii) {
+        av_init_packet(&this->packet_);
+        this->packet_.data = nullptr;    // packet data will be allocated by the encoder
+        this->packet_.size = 0;
+        const int res = avcodec_receive_packet(this->ctx_, &this->packet_);
+        switch (res) {
+        case 0:
+            this->out_.write(reinterpret_cast<char*>(this->packet_.data), this->packet_.size);
+            break;
+        case AVERROR(EAGAIN):
+            // output is not available right now - user must try to send input
+            return true;
+        case AVERROR_EOF:
+            //the encoder has been fully flushed, and there will be no more output packets
+            return false;
+        case AVERROR(EINVAL):
+            throw std::runtime_error("avcodec_receive_packet: AVERROR(EINVAL), codec not opened, or it is an encoder other errors: legitimate decoding errors");        
+        default:
+            throw std::runtime_error("avcodec_receive_packet failed: " + std::to_string(res));
+        }
     }
-    return got_output;
+    throw std::runtime_error("video_encode_receive_packets too many loops");
 }
 
 // ===========================
@@ -194,8 +238,8 @@ private:
     Decoder(const Decoder&) = delete;
     Decoder& operator=(const Decoder&) = delete;
     
-    int decode();
-    bool read_input();
+    bool send_packets();
+    AVPacket* read_input();
     
     std::istream& in_;
     std::ostream& out_;
@@ -247,40 +291,65 @@ std::unique_ptr<Decoder> Decoder::create(
 
 bool Decoder::next() {
     for (;;) {
-        while (this->packet_.size > 0) {
-            if (decode()) {
-                return true;
-            }
-        }
-        if (! read_input()) {
-            return decode() != 0;
+        const int res = avcodec_receive_frame(this->ctx_, this->frame_);
+        switch (res) {
+        case 0:
+            // success, a frame was returned
+            return true;
+        case AVERROR(EAGAIN):
+            // output is not available right now - user must try to send new input
+            send_packets();
+            break;
+        case AVERROR_EOF:
+            //the decoder has been fully flushed, and there will be no more output frames
+            return false;
+        case AVERROR(EINVAL):
+            throw std::runtime_error("avcodec_receive_frame: AVERROR(EINVAL), codec not opened, or it is an encoder other negative values: legitimate decoding errors");
+        default:
+            throw std::runtime_error("avcodec_receive_frame failed: " + std::to_string(res));
         }
     }
 }
 
-int Decoder::decode() {
-    int got_frame;
-    const int len = avcodec_decode_video2(this->ctx_, this->frame_, &got_frame, &this->packet_);
-    if (len < 0) {
-        throw std::runtime_error("avcodec_decode_video2: failed: " + std::to_string(len));
+bool Decoder::send_packets() {
+    for (;;) {
+        AVPacket* packet = read_input();
+        const int res = avcodec_send_packet(this->ctx_, packet);
+        switch (res) {
+        case 0:
+            //success, keep feeding with input
+            break;
+            
+        case AVERROR(EAGAIN):
+            // input is not accepted right now - the packet must be resent after trying to read output
+            return true;
+
+        case AVERROR_EOF:
+            //the decoder has been flushed, and no new packets can be sent to it (also returned if more than 1 flush packet is sent)
+            return false;
+
+        case AVERROR(EINVAL):
+            throw std::runtime_error("avcodec_send_packet failed: AVERROR(EINVAL): codec not opened, it is an encoder, or requires flush");
+
+        case AVERROR(ENOMEM):
+            throw std::runtime_error("avcodec_send_packet failed: AVERROR(ENOMEM): failed to add packet to internal queue, or similar other errors: legitimate decoding errors");
+            
+        default:
+            throw std::runtime_error("avcodec_send_packet failed: unknown error: " + std::to_string(res));
+        }
     }
-    if (this->packet_.data != nullptr) {
-        this->packet_.size -= len;
-        this->packet_.data += len;
-    }
-    return got_frame;
 }
 
-bool Decoder::read_input() {
+AVPacket* Decoder::read_input() {
     if (this->in_.eof()) {
         this->packet_.data = nullptr;
         this->packet_.size = 0;
-        return false;
+        return nullptr;
     } else {
         this->in_.read(reinterpret_cast<char*>(this->buffer_), BUFFER_SIZE);
         this->packet_.data = this->buffer_;
         this->packet_.size = this->in_.gcount();
-        return true;
+        return &this->packet_;
     }
 }
 
@@ -308,7 +377,7 @@ void video_encode_example2(AVCodecID codec_id) {
     
     auto encoder = Encoder::create(fout, codec_id, 352, 288, 25);
     {
-        for (int tt = 0; tt < 25; ++tt) {
+        for (int tt = 0; tt < 25 * 10; ++tt) {
             make_image2(tt, encoder->frame());
             encoder->next();
         }
