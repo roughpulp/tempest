@@ -12,9 +12,129 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/mathematics.h>
 #include <libavutil/samplefmt.h>
+#include <libswscale/swscale.h>
 }
 
 using namespace std;
+
+//===========================================
+// Scaler
+//===========================================
+
+class ImageFormat {
+public:
+    int width_;
+    int height_;
+    enum AVPixelFormat format_;
+
+    ImageFormat():
+        width_(-1),
+        height_(-1),
+        format_(AV_PIX_FMT_NONE)
+    {}
+    
+    ImageFormat(int ww, int hh, enum AVPixelFormat fmt):
+        width_(ww),
+        height_(hh),
+        format_(fmt)
+    {}
+    
+};
+
+class AvImage {
+public:
+    uint8_t* data_[4];
+    int linesize_[4];
+    
+    static std::unique_ptr<AvImage> create(const ImageFormat& fmt, int align);
+
+    AvImage(const ImageFormat& fmt): format_(fmt) {
+        data_[0] = nullptr;
+        data_[1] = nullptr;
+        data_[2] = nullptr;
+        data_[3] = nullptr;
+        linesize_[0] = 0;
+        linesize_[1] = 0;
+        linesize_[2] = 0;
+        linesize_[3] = 0;
+    }
+    
+    ~AvImage();
+
+    const ImageFormat& format() { return format_; }
+    
+private:
+    ImageFormat format_;
+};
+
+std::unique_ptr<AvImage> AvImage::create(const ImageFormat& fmt, int align) {
+    auto img  = std::make_unique<AvImage>(fmt);
+    const int ret = av_image_alloc(img->data_, img->linesize_, fmt.width_, fmt.height_, fmt.format_, align);
+    if (ret < 0) {
+        throw std::runtime_error("av_image_alloc: failed: " + std::to_string(ret));
+    }
+    return img;
+}
+
+AvImage::~AvImage() {
+    av_freep(&data_[0]);
+}
+
+class Scaler {
+public:
+
+    static std::unique_ptr<Scaler> create(
+        const ImageFormat& src,
+        const ImageFormat& dst,
+        int flags);
+
+    Scaler(struct SwsContext* ctx):
+        ctx_(ctx) {}
+
+    void scale(
+        const uint8_t* const srcSlice[], const int srcStride[],
+        int srcSliceY, int srcSliceH,
+        uint8_t* const dstSlice[], const int dstStride[]);
+        
+    ~Scaler();
+
+private:
+
+    Scaler(const Scaler&) = delete;
+    Scaler& operator=(const Scaler&) = delete; 
+
+    struct SwsContext* ctx_;
+};
+
+std::unique_ptr<Scaler> Scaler::create(
+    const ImageFormat& src,
+    const ImageFormat& dst,
+    int flags)
+    {
+    struct SwsContext* ctx = sws_getContext(
+        src.width_, src.height_, src.format_,
+        dst.width_, dst.height_, dst.format_,
+        flags,
+        nullptr, nullptr,
+        nullptr);
+    return std::make_unique<Scaler>(ctx);
+}
+
+Scaler::~Scaler() {
+    sws_freeContext(ctx_);
+}
+
+void Scaler::scale(
+    const uint8_t* const srcSlice[], const int srcStride[],
+    int srcSliceY, int srcSliceH,
+    uint8_t* const dstSlice[], const int dstStride[]) {
+    sws_scale(
+        ctx_,
+        srcSlice, srcStride,
+        srcSliceY, srcSliceH,
+        dstSlice, dstStride
+    );
+}
 
 // ===========================
 // Encoder
@@ -26,33 +146,38 @@ public:
     static std::unique_ptr<Encoder> create(
         std::ostream& out,
         AVCodecID codec_id,
-        int width, int size,
+        const ImageFormat& format,
         int fps
     );
 
     Encoder(
         std::ostream& out,
         AVCodecContext* ctx,
-        AVFrame* frame
+        AVFrame* frame,
+        const ImageFormat& format
     ):
+        format_(format),
         out_(out),
         ctx_(ctx),
         frame_(frame) {}
 
     ~Encoder();
 
+    const ImageFormat& format() { return format_; }
+    
     AVFrame* frame() { return frame_; } 
 
     void next();
 
     void close();
-    
+
 private:
     Encoder(const Encoder&) = delete;
     Encoder& operator=(const Encoder&) = delete;
     
     int send_frame(AVFrame* frame);
     
+    const ImageFormat format_;
     std::ostream& out_;
     AVCodecContext* ctx_;
     AVFrame* frame_;
@@ -69,7 +194,7 @@ Encoder::~Encoder() {
 std::unique_ptr<Encoder> Encoder::create(
         std::ostream& out,
         AVCodecID codec_id,
-        int width, int height,
+        const ImageFormat& format,
         int fps
     ) {
     avcodec_register_all();
@@ -88,8 +213,8 @@ std::unique_ptr<Encoder> Encoder::create(
     /* put sample parameters */
     ctx->bit_rate = 400000;
     /* resolution must be a multiple of two */
-    ctx->width = width;
-    ctx->height = height;
+    ctx->width = format.width_;
+    ctx->height = format.height_;
     /* frames per second */
     ctx->time_base = (AVRational){1,fps};
     /* emit one intra frame every ten frames
@@ -100,7 +225,7 @@ std::unique_ptr<Encoder> Encoder::create(
      */
     ctx->gop_size = 10;
     ctx->max_b_frames = 1;
-    ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+    ctx->pix_fmt = format.format_;
 
     if (codec_id == AV_CODEC_ID_H264) {
         av_opt_set(ctx->priv_data, "preset", "slow", 0);
@@ -128,7 +253,7 @@ std::unique_ptr<Encoder> Encoder::create(
         cout << "av_image_alloc() = " << nbytes << endl;
     }
     
-    return std::make_unique<Encoder>(out, ctx, frame);
+    return std::make_unique<Encoder>(out, ctx, frame, format);
 }
 
 void Encoder::next() {
@@ -303,16 +428,27 @@ bool Decoder::read_input() {
 //===========================================
 
 void make_image2(int tt, AVFrame* frame) {
-    frame->pts = tt;
-    for (int y = 0; y < frame->height; y++) {
-        for (int x = 0; x < frame->width; x++) {
-            frame->data[0][y * frame->linesize[0] + x] = x + y + tt * 3;
+    for (int y = 0; y < frame->height; ++y) {
+        for (int x = 0; x < frame->width; ++x) {
+            frame->data[0][y * frame->linesize[0] + x] = x + tt * 3;
         }
-    }
+    }/*
     for (int y = 0; y < frame->height/2; y++) {
         for (int x = 0; x < frame->width/2; x++) {
             frame->data[1][y * frame->linesize[1] + x] = 128 + y + tt * 2;
             frame->data[2][y * frame->linesize[2] + x] = 64 + x + tt * 5;
+        }
+    }*/
+}
+
+void make_image(int tt, std::unique_ptr<AvImage>& img) {
+    const int width = img->format().width_;
+    const int height = img->format().height_;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            img->data_[0][(x * 4) + (y * width * 4) + 0] = x + tt * 3;
+            img->data_[0][(x * 4) + (y * width * 4) + 1] = x + tt * 3;
+            img->data_[0][(x * 4) + (y * width * 4) + 2] = x + tt * 3;
         }
     }
 }
@@ -320,10 +456,20 @@ void make_image2(int tt, AVFrame* frame) {
 void video_encode_example2(AVCodecID codec_id) {
     std::ofstream fout("test.mpg1", std::ios::out | std::ios::binary);
     
-    auto encoder = Encoder::create(fout, codec_id, 352, 288, 25);
+    auto rgbImage = AvImage::create(ImageFormat(352, 288, AV_PIX_FMT_RGB32), 1);
+    
+    auto encoder = Encoder::create(fout, codec_id, ImageFormat(352, 288, AV_PIX_FMT_YUV420P), 25);
     {
+        auto scaler = Scaler::create(rgbImage->format(), encoder->format(), SWS_BILINEAR);
         for (int tt = 0; tt < 10 * 25; ++tt) {
             make_image2(tt, encoder->frame());
+            make_image(tt, rgbImage);
+            scaler->scale(
+                rgbImage->data_, rgbImage->linesize_,
+                0, rgbImage->format().height_,
+                encoder->frame()->data, encoder->frame()->linesize
+            );
+            encoder->frame()->pts = tt;
             encoder->next();
         }
     }
@@ -348,7 +494,8 @@ int main()
     cout << "encode begin" << endl << flush;
     video_encode_example2(codec_id);
     cout << "encode done" << endl << flush;
-    cout << "decode begin" << endl << flush;
-    video_decode(codec_id);
-    cout << "decode end" << endl << flush;
+//    cout << "decode begin" << endl << flush;
+//    video_decode(codec_id);
+//    cout << "decode end" << endl << flush;
+
 }
