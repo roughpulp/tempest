@@ -462,7 +462,6 @@ void video_encode_example2(AVCodecID codec_id) {
     {
         auto scaler = Scaler::create(rgbImage->format(), encoder->format(), SWS_BILINEAR);
         for (int tt = 0; tt < 10 * 25; ++tt) {
-            make_image2(tt, encoder->frame());
             make_image(tt, rgbImage);
             scaler->scale(
                 rgbImage->data_, rgbImage->linesize_,
