@@ -1,7 +1,7 @@
 package rpulp.tempest.editor.geometry;
 
-public class Line {
-    public static void line(
+public class DrawLine {
+    public static void drawLine(
             int x0, int y0,
             int x1, int y1,
             Action action) {
