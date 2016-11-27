@@ -2,10 +2,11 @@ package rpulp.tempest.editor;
 
 import rpulp.tempest.editor.blend.BlendFunction;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
 
-public class Texture
+public class Texture implements AutoCloseable
 {
     public static Texture create(int width, int height) {
         int size = width * height * 4;
@@ -22,6 +23,9 @@ public class Texture
         this.height = height;
         this.data = data;
     }
+
+    @Override
+    public void close() {}
 
     public int width() { return width; }
 
@@ -43,7 +47,7 @@ public class Texture
         }
     }
 
-    public void fill(int col) {
+    public void clear(int col) {
         for (int y = 0; y < height; ++y) {
             for (int x = 0; x < width; ++x) {
                 data.put(at(x, y), col);

@@ -11,8 +11,8 @@ public class TextureTest {
     public void clipBottomRight() {
         Texture dst = Texture.create(4, 4);
         Texture src = Texture.create(3, 3);
-        dst.fill(1);
-        src.fill(2);
+        dst.clear(1);
+        src.clear(2);
         dst.set(2, 2, src, SRC_OVERWRITES_DST);
         assertSameTextures(
                 TextureAssert.createTexture(
@@ -28,8 +28,8 @@ public class TextureTest {
     public void clipTopLeft() {
         Texture dst = Texture.create(4, 4);
         Texture src = Texture.create(3, 3);
-        dst.fill(1);
-        src.fill(2);
+        dst.clear(1);
+        src.clear(2);
         dst.set(-1, -2, src, SRC_OVERWRITES_DST);
         assertSameTextures(
                 TextureAssert.createTexture(

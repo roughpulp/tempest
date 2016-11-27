@@ -10,10 +10,10 @@ import java.nio.IntBuffer;
 
 public class CanvasBridge {
 
-    public static CanvasBridge create(Canvas canvas, Layers layers) {
+    public static CanvasBridge create(Canvas canvas, Layers layers, Brush brush) {
         GraphicsContext gfx = canvas.getGraphicsContext2D();
         PixelWriter writer = gfx.getPixelWriter();
-        return new CanvasBridge(canvas, writer, layers);
+        return new CanvasBridge(canvas, writer, layers, brush);
     }
 
     private final Canvas canvas;
@@ -25,12 +25,12 @@ public class CanvasBridge {
     private final EventHandler<MouseEvent> onMouseDragged;
     private final Brush brush;
 
-    private CanvasBridge(Canvas canvas, PixelWriter writer, Layers layers) {
+    private CanvasBridge(Canvas canvas, PixelWriter writer, Layers layers, Brush brush) {
         this.canvas = canvas;
         this.writer = writer;
         this.layers = layers;
         this.bottom = Texture.create(layers.width(), layers.height());
-        this.brush = new Brush();
+        this.brush = brush;
         this.onMousePressed = evt -> {
             brush.onPressed(layers.activeTexture(), (int)evt.getX(), (int)evt.getY());
             updateCanvas();

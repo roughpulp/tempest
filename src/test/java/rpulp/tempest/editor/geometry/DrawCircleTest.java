@@ -18,7 +18,7 @@ public class DrawCircleTest {
 
     public void drawCircle(int radius) {
         Texture texture = Texture.create(20, 20);
-        texture.fill('.');
+        texture.clear('.');
         DrawCircle.drawCircle(10, 10, radius, (x, y) -> texture.putPixel(x, y, 'X') );
         System.out.println(textureToString(texture));
     }
