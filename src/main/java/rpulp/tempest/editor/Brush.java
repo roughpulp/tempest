@@ -37,12 +37,13 @@ public class Brush {
     private void updateMotif() {
         LOGGER.debug("updateMotif(size: {}, color: {})", size, Integer.toHexString(color));
         {
-            final int minSize = (size * 2) + 1;
-            if (motif != null && motif.width() < minSize) {
+            int motifResize = (size * 2) + 1;
+            motifResize = Math.max(16, motifResize);
+            if (motif != null && motif.width() != motifResize) {
                 closeMotif();
             }
             if (motif == null) {
-                motif = Texture.create(minSize, minSize);
+                motif = Texture.create(motifResize, motifResize);
             }
         }
         motif.clear(0x000000);
